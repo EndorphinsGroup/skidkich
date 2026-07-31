@@ -4,41 +4,35 @@ import re
 import pytesseract
 from PIL import Image
 import io
+from datetime import datetime, timezone, timedelta
 
 # ID ВАШИХ ГРУПП
 GROUP_SOURCE = -101295534  
 GROUP_TARGET = -228796982  
 
+# СПИСОК ВРЕМЕНИ РЕКЛАМНЫХ ПОСТОВ (по МСК)
+FORBIDDEN_TIMES = ['10:02', '12:02', '14:02', '16:02', '18:02', '20:02', '21:02']
+
 VK_TOKEN = os.environ.get('VK_TOKEN')
 API_VERSION = '5.131'
 
 def check_url_for_erid(url):
-    """Маскируется под браузер, переходит по ссылке и ищет erid везде"""
     try:
         if not url.startswith('http'): url = 'https://' + url
-        # Притворяемся настоящим человеком, чтобы сайты не блокировали бота
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'}
-        
         r = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
         final_url = r.url.lower()
-        
-        # 1. Проверяем саму финальную ссылку
-        if 'erid' in final_url: return True
-        
-        # 2. ХИТРОСТЬ: редирект бывает через JS. Ищем erid прямо в коде страницы!
-        if 'erid' in r.text.lower(): return True
+        if 'erid' in final_url or 'erid' in r.text.lower(): return True
     except:
         pass
     return False
 
 def check_image_for_erid(photo_url):
-    """Скачивает картинку и ищет erid"""
     try:
         r = requests.get(photo_url, timeout=10)
         img = Image.open(io.BytesIO(r.content))
         text_on_image = pytesseract.image_to_string(img, lang='eng+rus').lower()
-        if 'erid' in text_on_image or 'ерид' in text_on_image:
-            return True
+        if 'erid' in text_on_image or 'ерид' in text_on_image: return True
     except:
         pass
     return False
@@ -50,42 +44,30 @@ def get_largest_photo_url(photo_item):
     return best_size.get('url')
 
 def has_erid(post):
-    # 1. Собираем ВООБЩЕ ВЕСЬ текст (включая скрытые описания ссылок)
     all_text = post.get('text', '')
-    
     for att in post.get('attachments', []):
         if att['type'] == 'link':
             link = att['link']
-            # Склеиваем заголовок, описание и саму ссылку
             all_text += f" {link.get('url', '')} {link.get('title', '')} {link.get('description', '')} {link.get('caption', '')}"
             
     all_text = all_text.lower()
     
-    # ПРОВЕРКА 1: Текст
     if 'erid' in all_text or 'ерид' in all_text:
-        print("Нашли erid в тексте или скрытом описании!")
         return True
 
-    # ПРОВЕРКА 2: Разворачиваем все короткие ссылки
     urls_in_text = re.findall(r'(?:https?://|vk\.cc/|clck\.ru/|ozon\.ru/t/)[^\s]+', all_text)
     for url in urls_in_text:
         url = url.rstrip('.,!?"\')')
-        if check_url_for_erid(url):
-            print(f"Нашли erid внутри зашифрованной ссылки: {url}")
-            return True
+        if check_url_for_erid(url): return True
 
-    # ПРОВЕРКА 3: Все картинки (и обычные, и превью от ссылок)
     for att in post.get('attachments', []):
         photo_url = None
         if att['type'] == 'photo':
             photo_url = get_largest_photo_url(att['photo'])
         elif att['type'] == 'link' and 'photo' in att['link']:
-            # Достаем картинку из превью ссылки!
             photo_url = get_largest_photo_url(att['link']['photo'])
             
-        if photo_url and check_image_for_erid(photo_url):
-            print("Нашли erid на картинке!")
-            return True
+        if photo_url and check_image_for_erid(photo_url): return True
             
     return False
 
@@ -96,8 +78,7 @@ def get_attachments_string(post):
         if att_type in ['photo', 'video', 'audio', 'doc']:
             item = att[att_type]
             att_str = f"{att_type}{item['owner_id']}_{item['id']}"
-            if 'access_key' in item:
-                att_str += f"_{item['access_key']}"
+            if 'access_key' in item: att_str += f"_{item['access_key']}"
             attachments.append(att_str)
     return ','.join(attachments)
 
@@ -126,8 +107,19 @@ def main():
     posts = sorted([p for p in posts if p['id'] > last_id], key=lambda x: x['id'])
     new_last_id = last_id
 
+    msk_tz = timezone(timedelta(hours=3))
+
     for post in posts:
+        post_date = datetime.fromtimestamp(post['date'], tz=msk_tz)
+        post_time_str = post_date.strftime('%H:%M')
+
+        if post_time_str in FORBIDDEN_TIMES:
+            print(f"Пост {post['id']} ПРОПУЩЕН: он вышел в рекламное время {post_time_str}.")
+            new_last_id = max(new_last_id, post['id'])
+            continue
+
         if has_erid(post) or post.get('marked_as_ads'):
+            print(f"Пост {post['id']} ПРОПУЩЕН: нашли erid.")
             new_last_id = max(new_last_id, post['id'])
             continue
 
@@ -143,7 +135,7 @@ def main():
         post_response = requests.post('https://api.vk.com/method/wall.post', data=post_data).json()
         
         if 'response' in post_response:
-            print(f"Пост {post['id']} скопирован.")
+            print(f"Пост {post['id']} УСПЕШНО скопирован (Время: {post_time_str}).")
             new_last_id = max(new_last_id, post['id'])
         else:
             print("Ошибка:", post_response)
