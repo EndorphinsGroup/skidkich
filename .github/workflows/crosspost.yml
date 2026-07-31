@@ -2,9 +2,16 @@ name: VK Crossposter
 
 on:
   schedule:
-    - cron: '3 6,8,10,12,14,16 * * *'
+    # Запускаем в 08 минут каждого часа (9:08, 11:08, 13:08, 15:08, 17:08, 19:08 по МСК)
+    # В UTC (МСК - 3) это часы: 6, 8, 10, 12, 14, 16
+    - cron: '8 6,8,10,12,14,16 * * *'
+    
+    # 20:30 (МСК) — тут сильных пробок нет, запускаем в 20:32 МСК (17:32 UTC)
     - cron: '32 17 * * *'
-    - cron: '1 19 * * *'
+    
+    # 21:59 (МСК) — отодвигаем на 5 минут от начала часа, запуск в 22:04 МСК (19:04 UTC)
+    - cron: '4 19 * * *'
+    
   workflow_dispatch:
 
 permissions:
@@ -15,16 +22,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      
+      # Устанавливаем системную программу для чтения текста на картинках
+      - name: Install Tesseract OCR
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng
+
       - uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      - run: |
+          
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
-          pip install requests
+          pip install requests pytesseract Pillow
+
       - env:
           VK_TOKEN: ${{ secrets.VK_TOKEN }}
         run: python bot.py
-      - run: |
+        
+      - name: Commit last_post_id
+        run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
           git add last_post_id.txt
